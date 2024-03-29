@@ -33,6 +33,8 @@ import sys
 # sys.path.append('/kaggle/input/kaggle-kl-div')
 from kaggle_kl_div import score
 
+import pywt
+
 # setting about environment and data path
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
@@ -60,7 +62,8 @@ TEST_SPEC_SPLIT = DATA / "test_spectrograms_split"
 DATA.mkdir(exist_ok=True)
 TRAIN_SPEC_SPLIT.mkdir(exist_ok=True)
 TEST_SPEC_SPLIT.mkdir(exist_ok=True)
-
+wavelet_folder = TRAIN_SPEC_SPLIT / "wavelet_features"
+wavelet_folder.mkdir(parents=True, exist_ok=True)
 
 #Here is the wrapper defination for logging running time
 
@@ -110,13 +113,15 @@ def fold_train_data(train):
 
 # Reading spectrogram parquet file based on spectrogram_id, save into npy file
 @log_time
-def reading_spectrogram(train):
-    logging.info('train.head():',train.head(20))
-    logging.info('train.groupby("spectrogram_id").head():',train.groupby("spectrogram_id").head(20))
-    print('train.head():',train.head(20))
-    print('train.groupby("spectrogram_id").head():',train.groupby("spectrogram_id").head(20))
+def reading_spectrogram(train,wavelet = None):
+
+    if wavelet is not None:
+        logging.info('Preparing data: wavelet feature computation on')
+    else:
+        logging.info('Preparing data: wavelet feature computation off')
+
     for spec_id, df in tqdm(train.groupby("spectrogram_id")):
-        # print('df:',df)
+
         spec = pd.read_parquet(TRAIN_SPEC / f"{spec_id}.parquet")
         #Transform as hz, time style
         spec_arr = spec.fillna(0).values[:, 1:].T.astype("float32")  # (Hz, Time) = (400, 300)
@@ -128,7 +133,11 @@ def reading_spectrogram(train):
         ].values:
             spec_offset = spec_offset // 2
             split_spec_arr = spec_arr[:, spec_offset: spec_offset + 300]
-            np.save(TRAIN_SPEC_SPLIT / f"{label_id}.npy" , split_spec_arr)
+            if wavelet is not None:
+                wavelet_features = np.array([compute_wavelet_features(row, wavelet=wavelet) for row in split_spec_arr])
+                np.save(wavelet_folder / f"{label_id}_wavelet.npy", wavelet_features)
+            else:
+                np.save(TRAIN_SPEC_SPLIT / f"{label_id}.npy" , split_spec_arr)
     return 
 
 # def model structure
@@ -262,16 +271,21 @@ def to_device(
         return tensors.to(device, *args, **kwargs)
 
 
-def get_path_label(val_fold, train_all: pd.DataFrame):
+def get_path_label(val_fold, train_all: pd.DataFrame,use_wavelet=False):
     """Get file path and target info."""
     print(train_all.head(10))
     train_idx = train_all[train_all["fold"] != val_fold].index.values
     val_idx   = train_all[train_all["fold"] == val_fold].index.values
     img_paths = []
     labels = train_all[CLASSES].values
-    for label_id in train_all["label_id"].values:
-        img_path = TRAIN_SPEC_SPLIT / f"{label_id}.npy"
-        img_paths.append(img_path)
+    if use_wavelet == True:
+        for label_id in train_all["label_id"].values:
+            img_path = wavelet_folder / f"{label_id}_wavelet.npy"
+            img_paths.append(img_path)
+    else:
+        for label_id in train_all["label_id"].values:
+            img_path = TRAIN_SPEC_SPLIT / f"{label_id}.npy"
+            img_paths.append(img_path)
 
     train_data = {
         "image_paths": [img_paths[idx] for idx in train_idx],
@@ -296,14 +310,14 @@ def get_transforms(CFG):
     return train_transform, val_transform
 
 @log_time
-def train_one_fold(CFG, val_fold, train_all, output_path):
+def train_one_fold(CFG, val_fold, train_all, output_path, use_wavelet):
     """Main"""
     print('into train_one_fold function')
     torch.backends.cudnn.benchmark = True
     set_random_seed(CFG.seed, deterministic=CFG.deterministic)
     device = torch.device(CFG.device)
     
-    train_path_label, val_path_label, _, _ = get_path_label(val_fold, train_all)
+    train_path_label, val_path_label, _, _ = get_path_label(val_fold, train_all,use_wavelet)
     train_transform, val_transform = get_transforms(CFG)
     
     train_dataset = HMSHBACSpecDataset(**train_path_label, transform=train_transform)
@@ -386,15 +400,18 @@ def train_one_fold(CFG, val_fold, train_all, output_path):
     return val_fold, best_epoch, best_val_loss
 
 @log_time
-def fold_training(CFG,train):
+def fold_training(CFG,train,use_wavelet=False):
     print('into fold_training')
     score_list = []
     for fold_id in FOLDS:
         output_path = Path(f"fold{fold_id}")
         output_path.mkdir(exist_ok=True)
         print(f"[fold{fold_id}]")
-        print('best_score now:',train_one_fold(CFG, fold_id, train, output_path))
-        score_list.append(train_one_fold(CFG, fold_id, train, output_path))
+        best_score_now = train_one_fold(CFG, fold_id, train, output_path,use_wavelet)
+        print('best_score now:',best_score_now)
+        score_list.append(best_score_now)
+        logging.info("Now calling train_one_fold only once per fold to avoid redundant computations.")
+    logging.info("Completed training with wavelet features." if use_wavelet else "Completed training without wavelet features.")
     return score_list
 
 @log_time
@@ -411,6 +428,16 @@ def run_inference_loop(model, loader, device):
     pred_arr = np.concatenate(pred_list)
     del pred_list
     return pred_arr
+
+# Add code on wavelet feature extraction
+def compute_wavelet_features(signal, wavelet='db4', level=5):
+    coeffs = pywt.wavedec(signal, wavelet, level=level)
+    # 从小波系数中提取特征而不是直接用小波系数，因为有不规则大小。
+    features = []
+    for coeff in coeffs:
+        features.extend([np.mean(coeff), np.std(coeff)])
+    return np.array(features)
+
 
 # Setting for training
 RANDAM_SEED = 1086
@@ -443,16 +470,20 @@ if __name__ == "__main__":
     logging.info('--------------------------------------------------')
     # logging.info(f'Into loading stage')
 
-    # train = load_data(DATA)
-    # # train = train.groupby("spectrogram_id").head(1).reset_index(drop=True)
-    # print('train.shape:',train.shape)
-    # train = fold_train_data(train)
-    # print(train.groupby("fold")[CLASSES].sum())
+    train = load_data(DATA)
+    # train = train.groupby("spectrogram_id").head(1).reset_index(drop=True)
+    print('train.shape:',train.shape)
+    train = fold_train_data(train)
+    print(train.groupby("fold")[CLASSES].sum())
+    
     # reading_spectrogram(train)
     # train.to_csv("modified_train.csv", index=False)
+    reading_spectrogram(train,wavelet='db4')
+    train.to_csv("wavelet_modified_train.csv", index=False)
 
     # # Training stage
-    train = pd.read_csv("modified_train.csv")
+    use_wavelet = True 
+    train = pd.read_csv("wavelet_modified_train.csv")
     # model_list = ['efficientnet_b2','efficientnet_b4','efficientnet_b7','res2net50d']
     model_list = ['efficientnet_b4']
     for model_name in model_list:
@@ -460,7 +491,7 @@ if __name__ == "__main__":
         logging.info(f'Into training stage of {model_name}')
         cfg = CFG()
         cfg.model_name = model_name
-        score_list = fold_training(cfg,train)
+        score_list = fold_training(cfg,train,use_wavelet)
         print(score_list)
         logging.info(f'score_list of {model_name}:{score_list}')
         # score_list = [(0, 4, 3.112013339996338), (1, 3, 2.617021322250366)]
@@ -492,7 +523,7 @@ if __name__ == "__main__":
             cfg.model_name = model_name
             
             # get_dataloader
-            _, val_path_label, _, val_idx = get_path_label(fold_id, train)
+            _, val_path_label, _, val_idx = get_path_label(fold_id, train,use_wavelet)
             _, val_transform = get_transforms(CFG)
             val_dataset = HMSHBACSpecDataset(**val_path_label, transform=val_transform)
             val_loader = torch.utils.data.DataLoader(
