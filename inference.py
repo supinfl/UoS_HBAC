@@ -33,11 +33,10 @@ import sys
 # sys.path.append('/kaggle/input/kaggle-kl-div')
 from kaggle_kl_div import score
 
-
 # setting about environment and data path
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
-ROOT = Path.cwd().parent
+ROOT = Path.cwd()
 INPUT = ROOT / "input"
 OUTPUT = ROOT / "output"
 SRC = ROOT / "src"
@@ -62,13 +61,6 @@ DATA.mkdir(exist_ok=True)
 TRAIN_SPEC_SPLIT.mkdir(exist_ok=True)
 TEST_SPEC_SPLIT.mkdir(exist_ok=True)
 
-# Setting for training
-RANDAM_SEED = 1086
-CLASSES = ["seizure_vote", "lpd_vote", "gpd_vote", "lrda_vote", "grda_vote", "other_vote"]
-N_CLASSES = len(CLASSES)
-# FOLDS = [0, 1, 2, 3, 4] 
-FOLDS = [0, 1] 
-N_FOLDS = len(FOLDS)
 
 #Here is the wrapper defination for logging running time
 
@@ -119,6 +111,8 @@ def fold_train_data(train):
 # Reading spectrogram parquet file based on spectrogram_id, save into npy file
 @log_time
 def reading_spectrogram(train):
+    logging.info('train.head():',train.head(20))
+    logging.info('train.groupby("spectrogram_id").head():',train.groupby("spectrogram_id").head(20))
     print('train.head():',train.head(20))
     print('train.groupby("spectrogram_id").head():',train.groupby("spectrogram_id").head(20))
     for spec_id, df in tqdm(train.groupby("spectrogram_id")):
@@ -244,19 +238,6 @@ class KLDivLossWithLogitsForVal(nn.KLDivLoss):
         
         return final_metric
     
-#training config
-class CFG:
-    model_name = "efficientnet_b2"
-    img_size = 512
-    max_epoch = 9
-    batch_size = 16
-    lr = 1.0e-03
-    weight_decay = 1.0e-02
-    es_patience =  5
-    seed = 1086
-    deterministic = True
-    enable_amp = False
-    device = "cuda"
 
 
 def set_random_seed(seed: int = 42, deterministic: bool = False):
@@ -333,8 +314,10 @@ def train_one_fold(CFG, val_fold, train_all, output_path):
     val_loader = torch.utils.data.DataLoader(
         val_dataset, batch_size=CFG.batch_size, num_workers=4, shuffle=False, drop_last=False)
     
+    # model = HMSHBACSpecModel(
+    #     model_name=CFG.model_name, pretrained=True, num_classes=6, in_channels=1)
     model = HMSHBACSpecModel(
-        model_name=CFG.model_name, pretrained=True, num_classes=6, in_channels=1)
+        model_name=CFG.model_name, pretrained=False, num_classes=6, in_channels=1)
     model.to(device)
     print('train_one_fold function: start to optimize')
     optimizer = optim.AdamW(params=model.parameters(), lr=CFG.lr, weight_decay=CFG.weight_decay)
@@ -403,7 +386,7 @@ def train_one_fold(CFG, val_fold, train_all, output_path):
     return val_fold, best_epoch, best_val_loss
 
 @log_time
-def fold_training():
+def fold_training(CFG,train):
     print('into fold_training')
     score_list = []
     for fold_id in FOLDS:
@@ -429,66 +412,124 @@ def run_inference_loop(model, loader, device):
     del pred_list
     return pred_arr
 
+# Setting for training
+RANDAM_SEED = 1086
+CLASSES = ["seizure_vote", "lpd_vote", "gpd_vote", "lrda_vote", "grda_vote", "other_vote"]
+N_CLASSES = len(CLASSES)
+# FOLDS = [0, 1, 2, 3, 4] 
+FOLDS = [0, 1] 
+N_FOLDS = len(FOLDS)
 
+#training config
+class CFG:
+    model_name = None
+    img_size = 512
+    max_epoch = 9
+    batch_size = 8
+    # batch_size = 16
+    lr = 1.0e-03
+    weight_decay = 1.0e-02
+    es_patience =  5
+    seed = 1086
+    deterministic = True
+    enable_amp = False
+    device = "cuda"
 
 
 if __name__ == "__main__":
-    train = load_data(DATA)
-    # train = train.groupby("spectrogram_id").head(1).reset_index(drop=True)
-    print('train.shape:',train.shape)
-    train = fold_train_data(train)
-    print(train.groupby("fold")[CLASSES].sum())
-    reading_spectrogram(train)
-    score_list = fold_training()
-    print(score_list)
-    # best_log_list = []
-    # score_list = {(0, 2, 0.7013723254203796)}
-    # for (fold_id, best_epoch, _) in score_list:
-    #     exp_dir_path = Path(f"fold{fold_id}")
-    #     best_model_path = exp_dir_path / f"snapshot_epoch_{best_epoch}.pth"
-    #     copy_to = f"./best_model_fold{fold_id}.pth"
-    #     shutil.copy(best_model_path, copy_to)
+    overall_start_time = time()
+    print(f"Log file path: {log_filename.absolute()}")
     
-    #     for p in exp_dir_path.glob("*.pth"):
-    #         p.unlink()
+    logging.info('--------------------------------------------------')
+    # logging.info(f'Into loading stage')
 
-    label_arr = train[CLASSES].values
-    oof_pred_arr = np.zeros((len(train), N_CLASSES))
-    score_list = []
+    # train = load_data(DATA)
+    # # train = train.groupby("spectrogram_id").head(1).reset_index(drop=True)
+    # print('train.shape:',train.shape)
+    # train = fold_train_data(train)
+    # print(train.groupby("fold")[CLASSES].sum())
+    # reading_spectrogram(train)
+    # train.to_csv("modified_train.csv", index=False)
 
-    # for fold_id in range(N_FOLDS):
-    # print(f"\n[fold {fold_id}]")
-    device = torch.device(CFG.device)
+    # # Training stage
+    train = pd.read_csv("modified_train.csv")
+    # model_list = ['efficientnet_b2','efficientnet_b4','efficientnet_b7','res2net50d']
+    model_list = ['efficientnet_b4']
+    for model_name in model_list:
+        logging.info('--------------------------------------------------')
+        logging.info(f'Into training stage of {model_name}')
+        cfg = CFG()
+        cfg.model_name = model_name
+        score_list = fold_training(cfg,train)
+        print(score_list)
+        logging.info(f'score_list of {model_name}:{score_list}')
+        # score_list = [(0, 4, 3.112013339996338), (1, 3, 2.617021322250366)]
+        logging.info(f'Move models of {model_name}into new folder')
+        for (fold_id, best_epoch, _) in score_list:
+            exp_dir_path = Path(f"fold{fold_id}")
+            best_model_path = exp_dir_path / f"snapshot_epoch_{best_epoch}.pth"
+            target_dir = Path(f"./best_model_fold/{model_name}")
+            target_dir.mkdir(parents=True, exist_ok=True)
+            copy_to = f"./best_model_fold/{model_name}/{fold_id}.pth"
+            shutil.copy(best_model_path, copy_to)
+            # for p in exp_dir_path.glob("*.pth"):
+            #     p.unlink()
 
-    # # get_dataloader
-    # _, val_path_label, _, val_idx = get_path_label(fold_id, train)
-    # _, val_transform = get_transforms(CFG)
-    # val_dataset = HMSHBACSpecDataset(**val_path_label, transform=val_transform)
-    # val_loader = torch.utils.data.DataLoader(
-    #     val_dataset, batch_size=CFG.batch_size, num_workers=4, shuffle=False, drop_last=False)
-    
-    # # # get model
-    # model_path = f"./best_model_fold{fold_id}.pth"
-    # model = HMSHBACSpecModel(
-    #     model_name=CFG.model_name, pretrained=False, num_classes=6, in_channels=1)
-    # model.load_state_dict(torch.load(model_path, map_location=device))
-    
-    # # # inference
-    # val_pred = run_inference_loop(model, val_loader, device)
-    # oof_pred_arr[val_idx] = val_pred
-    
-    # del val_idx, val_path_label
-    # del model, val_loader
-    # torch.cpu.empty_cache()
-    # gc.collect()
+        ## Inference stage
+        train = pd.read_csv("modified_train.csv")
+        logging.info(f'Into inference stage of {model_name}')
+        best_log_list = []
+        print(train.head())
+        label_arr = train[CLASSES].values
+        oof_pred_arr = np.zeros((len(train), N_CLASSES))
+        score_list = []
+
+        for fold_id in range(N_FOLDS):
+            logging.info(f'Into inference stage of {model_name}:fold{fold_id}')
+            print(f"\n[fold {fold_id}]")
+            device = torch.device(CFG.device)
+            cfg = CFG()
+            cfg.model_name = model_name
+            
+            # get_dataloader
+            _, val_path_label, _, val_idx = get_path_label(fold_id, train)
+            _, val_transform = get_transforms(CFG)
+            val_dataset = HMSHBACSpecDataset(**val_path_label, transform=val_transform)
+            val_loader = torch.utils.data.DataLoader(
+                val_dataset, batch_size=CFG.batch_size, num_workers=4, shuffle=False, drop_last=False)
+            
+            # # get model
+            model_path = f"./best_model_fold/{model_name}/{fold_id}.pth"
+            model = HMSHBACSpecModel(
+                model_name=cfg.model_name, pretrained=False, num_classes=6, in_channels=1)
+            model.load_state_dict(torch.load(model_path, map_location=device))
+            
+            # # inference
+            val_pred = run_inference_loop(model, val_loader, device)
+            oof_pred_arr[val_idx] = val_pred
+            
+            del val_idx, val_path_label
+            del model, val_loader
+            # torch.cpu.empty_cache()
+            torch.cuda.empty_cache()
+            gc.collect()
 
 
 
+        true = train[["label_id"] + CLASSES].copy()
+        print('true:',true)
+        oof = pd.DataFrame(oof_pred_arr, columns=CLASSES)
+        oof.insert(0, "label_id", train["label_id"])
+        print('oof:',oof)
+        cv_score = score(solution=true, submission=oof, row_id_column_name='label_id')
+        print(f'CV Score KL-Div for {model_name}',cv_score)
+        logging.info(f'CV Score KL-Div for {model_name}: {cv_score}')
 
-    # true = train[["label_id"] + CLASSES].copy()
-
-    # oof = pd.DataFrame(oof_pred_arr, columns=CLASSES)
-    # oof.insert(0, "label_id", train["label_id"])
-
-    # cv_score = score(solution=true, submission=oof, row_id_column_name='label_id')
-    # print('CV Score KL-Div for ResNet34d',cv_score)
+        overall_end_time = time()
+        total_time_taken = overall_end_time - overall_start_time
+        logging.info(f" {model_name} program execution time: {total_time_taken:.4f} seconds.")
+        print(f" {model_name} program execution time: {total_time_taken:.4f} seconds.")
+    overall_end_time = time()
+    total_time_taken = overall_end_time - overall_start_time
+    logging.info(f"Total program execution time: {total_time_taken:.4f} seconds.")
+    print(f"Total program execution time: {total_time_taken:.4f} seconds.")
