@@ -7,7 +7,7 @@ print("Data distribution:\n", class_distribution)
 
 
 min_samples = class_distribution.min()
-desired_samples = 100
+desired_samples = 50
 
 balanced_df = pd.DataFrame()
 for label in df['expert_consensus'].unique():
