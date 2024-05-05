@@ -38,12 +38,12 @@ class config:
     AMP = True
     BATCH_SIZE_TRAIN = 8
     BATCH_SIZE_VALID = 8
-    EPOCHS = 4
-    FOLDS = 5
+    EPOCHS = 3
+    FOLDS = 3
     FREEZE = False
     GRADIENT_ACCUMULATION_STEPS = 1
     MAX_GRAD_NORM = 1e7
-    MODEL = "efficientnet_b4"
+    MODEL = "tf_efficientnet_b0"
     NUM_FROZEN_LAYERS = 39
     NUM_WORKERS = 0 # multiprocessing.cpu_count()
     PRINT_FREQ = 20
@@ -265,14 +265,20 @@ class CustomModel(nn.Module):
     def __init__(self, config, num_classes: int = 6, pretrained: bool = True):
         super(CustomModel, self).__init__()
         self.USE_KAGGLE_SPECTROGRAMS = True
-        self.USE_EEG_SPECTROGRAMS = False
-        self.USE_WAVELET_SPECTROGRAMS = True
+        self.USE_EEG_SPECTROGRAMS = False 
+        self.USE_WAVELET_SPECTROGRAMS = False
         self.model = timm.create_model(
             config.MODEL,
             pretrained=pretrained,
             drop_rate = 0.1,
             drop_path_rate = 0.2,
         )
+        # add code on logging parameter
+        logging.info("config.MODEL: {}".format(config.MODEL))
+        logging.info("USE_KAGGLE_SPECTROGRAMS: {}".format(self.USE_KAGGLE_SPECTROGRAMS))
+        logging.info("USE_EEG_SPECTROGRAMS: {}".format(self.USE_EEG_SPECTROGRAMS))
+        logging.info("USE_WAVELET_SPECTROGRAMS: {}".format(self.USE_WAVELET_SPECTROGRAMS))
+
         if config.FREEZE:
             for i,(name, param) in enumerate(list(self.model.named_parameters())\
                                              [0:config.NUM_FROZEN_LAYERS]):
@@ -625,6 +631,7 @@ if __name__ == "__main__":
     overall_start_time = time.time()
     print(f"Log file path: {log_filename.absolute()}")
     logging.info('--------------------------------------------------')
+    logging.info(f'training on local balanced data')
     logging.info(f'Into loading stage')
 
     target_preds = [x + "_pred" for x in ['seizure_vote', 'lpd_vote', 'gpd_vote', 'lrda_vote', 'grda_vote', 'other_vote']]
@@ -657,8 +664,6 @@ if __name__ == "__main__":
     print(train_df.groupby('fold').size()), sep()
     print(train_df.head())
 
-    logging.info(f'training based on model: efficientnet_b4')
-    logging.info(f'Feature: without eegs, only specs and wavelets')
     train_dataset = CustomDataset(train_df, config, mode="train", 
                                   specs=all_spectrograms, eeg_specs=all_eegs,wavelets_spectrograms = all_wavelet_spectrograms)
     train_loader = DataLoader(
@@ -696,28 +701,28 @@ if __name__ == "__main__":
             plt.show()
             break
 
-    #dynamic learning rate
-    EPOCHS = config.EPOCHS
-    BATCHES = len(train_loader)
-    steps = []
-    lrs = []
-    optim_lrs = []
-    model = CustomModel(config)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
-    scheduler = OneCycleLR(
-        optimizer,
-        max_lr=1e-3,
-        epochs=config.EPOCHS,
-        steps_per_epoch=len(train_loader),
-        pct_start=0.05,
-        anneal_strategy="cos",
-        final_div_factor=100,
-    )
-    for epoch in range(EPOCHS):
-        for batch in range(BATCHES):
-            scheduler.step()
-            lrs.append(scheduler.get_last_lr()[0])
-            steps.append(epoch * BATCHES + batch)
+    # #dynamic learning rate
+    # EPOCHS = config.EPOCHS
+    # BATCHES = len(train_loader)
+    # steps = []
+    # lrs = []
+    # optim_lrs = []
+    # model = CustomModel(config)
+    # optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+    # scheduler = OneCycleLR(
+    #     optimizer,
+    #     max_lr=1e-3,
+    #     epochs=config.EPOCHS,
+    #     steps_per_epoch=len(train_loader),
+    #     pct_start=0.05,
+    #     anneal_strategy="cos",
+    #     final_div_factor=100,
+    # )
+    # for epoch in range(EPOCHS):
+    #     for batch in range(BATCHES):
+    #         scheduler.step()
+    #         lrs.append(scheduler.get_last_lr()[0])
+    #         steps.append(epoch * BATCHES + batch)
 
     # max_lr = max(lrs)
     # min_lr = min(lrs)
@@ -733,11 +738,10 @@ if __name__ == "__main__":
     if not config.TRAIN_FULL_DATA:
         oof_df = pd.DataFrame()
         for fold in range(config.FOLDS):
-            if fold in [0, 1, 2, 3, 4]:
-                _oof_df = train_loop(train_df, fold,)
-                oof_df = pd.concat([oof_df, _oof_df])
-                logging.info(f"========== Fold {fold} result: {get_result(_oof_df)} ==========")
-                print(f"========== Fold {fold} result: {get_result(_oof_df)} ==========")
+            _oof_df = train_loop(train_df, fold,)
+            oof_df = pd.concat([oof_df, _oof_df])
+            logging.info(f"========== Fold {fold} result: {get_result(_oof_df)} ==========")
+            print(f"========== Fold {fold} result: {get_result(_oof_df)} ==========")
         oof_df = oof_df.reset_index(drop=True)
         logging.info(f"========== CV: {get_result(oof_df)} ==========")
         logging.info(f"----------------------------------------------------------------------------------")
